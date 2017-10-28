@@ -21,6 +21,7 @@ import (
 	"github.com/weaveworks/cortex/pkg/querier"
 	"github.com/weaveworks/cortex/pkg/ring"
 	"github.com/weaveworks/cortex/pkg/util"
+	"github.com/weaveworks/promrus"
 )
 
 func main() {
@@ -40,6 +41,8 @@ func main() {
 	util.RegisterFlags(&serverConfig, &ringConfig, &distributorConfig,
 		&chunkStoreConfig, &schemaConfig, &storageConfig)
 	flag.Parse()
+
+	log.AddHook(promrus.MustNewPrometheusHook())
 
 	r, err := ring.New(ringConfig)
 	if err != nil {

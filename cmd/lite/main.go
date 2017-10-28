@@ -24,6 +24,7 @@ import (
 	"github.com/weaveworks/cortex/pkg/ring"
 	"github.com/weaveworks/cortex/pkg/ruler"
 	"github.com/weaveworks/cortex/pkg/util"
+	"github.com/weaveworks/promrus"
 )
 
 func main() {
@@ -50,6 +51,8 @@ func main() {
 		&ingesterConfig, &rulerConfig, &storageConfig, &schemaConfig)
 	flag.BoolVar(&unauthenticated, "unauthenticated", false, "Set to true to disable multitenancy.")
 	flag.Parse()
+
+	log.AddHook(promrus.MustNewPrometheusHook())
 
 	server, err := server.New(serverConfig)
 	if err != nil {

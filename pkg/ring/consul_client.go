@@ -60,7 +60,8 @@ type kv interface {
 
 type consulClient struct {
 	kv
-	codec Codec
+	codec            Codec
+	longPollDuration time.Duration
 }
 
 // NewConsulClient returns a new ConsulClient.
@@ -78,8 +79,9 @@ func NewConsulClient(cfg ConsulConfig, codec Codec) (KVClient, error) {
 		return nil, err
 	}
 	var c KVClient = &consulClient{
-		kv:    client.KV(),
-		codec: codec,
+		kv:               client.KV(),
+		codec:            codec,
+		longPollDuration: longPollDuration,
 	}
 	if cfg.Prefix != "" {
 		c = PrefixClient(c, cfg.Prefix)
@@ -245,7 +247,7 @@ func (c *consulClient) WatchPrefix(prefix string, done <-chan struct{}, f func(s
 		kvps, meta, err := c.kv.List(prefix, &consul.QueryOptions{
 			RequireConsistent: true,
 			WaitIndex:         index,
-			WaitTime:          longPollDuration,
+			WaitTime:          c.longPollDuration,
 		})
 		if err != nil {
 			log.Errorf("Error getting path %s: %v", prefix, err)
@@ -292,9 +294,9 @@ func (c *consulClient) WatchKey(key string, done <-chan struct{}, f func(interfa
 		kvp, meta, err := c.kv.Get(key, &consul.QueryOptions{
 			RequireConsistent: true,
 			WaitIndex:         index,
-			WaitTime:          longPollDuration,
+			WaitTime:          c.longPollDuration,
 		})
-		if err != nil {
+		if err != nil || kvp == nil {
 			log.Errorf("Error getting path %s: %v", key, err)
 			backoff.wait()
 			continue
@@ -308,14 +310,10 @@ func (c *consulClient) WatchKey(key string, done <-chan struct{}, f func(interfa
 		}
 		index = meta.LastIndex
 
-		var out interface{}
-		if kvp != nil {
-			var err error
-			out, err = c.codec.Decode(kvp.Value)
-			if err != nil {
-				log.Errorf("Error decoding %s: %v", key, err)
-				continue
-			}
+		out, err := c.codec.Decode(kvp.Value)
+		if err != nil {
+			log.Errorf("Error decoding %s: %v", key, err)
+			continue
 		}
 		if !f(out) {
 			return

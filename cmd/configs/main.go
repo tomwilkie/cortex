@@ -11,6 +11,7 @@ import (
 	"github.com/weaveworks/cortex/pkg/configs/api"
 	"github.com/weaveworks/cortex/pkg/configs/db"
 	"github.com/weaveworks/cortex/pkg/util"
+	"github.com/weaveworks/promrus"
 )
 
 func main() {
@@ -27,6 +28,8 @@ func main() {
 	)
 	util.RegisterFlags(&serverConfig, &dbConfig)
 	flag.Parse()
+
+	log.AddHook(promrus.MustNewPrometheusHook())
 
 	db, err := db.New(dbConfig)
 	if err != nil {
