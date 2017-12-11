@@ -9,8 +9,9 @@ import (
 	"sync"
 	"time"
 
+	gklog "github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/common/log"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/notifier"
@@ -180,7 +181,7 @@ func buildNotifierConfig(rulerConfig *Config) (*config.Config, error) {
 		}
 
 		if password, isSet := u.User.Password(); isSet {
-			amConfig.HTTPClientConfig.BasicAuth.Password = password
+			amConfig.HTTPClientConfig.BasicAuth.Password = config.Secret(password)
 		}
 	}
 
@@ -188,7 +189,7 @@ func buildNotifierConfig(rulerConfig *Config) (*config.Config, error) {
 }
 
 func (r *Ruler) newGroup(ctx context.Context, rs []rules.Rule) (*rules.Group, error) {
-	appender := appenderAdapter{pusher: r.pusher, ctx: ctx}
+	appendable := &appendableAppender{pusher: r.pusher, ctx: ctx}
 	userID, err := user.ExtractOrgID(ctx)
 	if err != nil {
 		return nil, err
@@ -198,14 +199,15 @@ func (r *Ruler) newGroup(ctx context.Context, rs []rules.Rule) (*rules.Group, er
 		return nil, err
 	}
 	opts := &rules.ManagerOptions{
-		SampleAppender: appender,
-		QueryEngine:    r.engine,
-		Context:        ctx,
-		ExternalURL:    r.alertURL,
-		Notifier:       notifier,
+		Appendable:  appendable,
+		QueryEngine: r.engine,
+		Context:     ctx,
+		ExternalURL: r.alertURL,
+		Notifier:    notifier,
+		Logger:      gklog.NewNopLogger(),
 	}
 	delay := 0 * time.Second // Unused, so 0 value is fine.
-	return rules.NewGroup("default", delay, rs, opts), nil
+	return rules.NewGroup("default", "none", delay, rs, opts), nil
 }
 
 func (r *Ruler) getOrCreateNotifier(userID string) (*notifier.Notifier, error) {
@@ -229,7 +231,7 @@ func (r *Ruler) getOrCreateNotifier(userID string) (*notifier.Notifier, error) {
 			}
 			return ctxhttp.Do(ctx, client, req)
 		},
-	})
+	}, gklog.NewNopLogger())
 
 	// This should never fail, unless there's a programming mistake.
 	if err := n.ApplyConfig(r.notifierCfg); err != nil {
@@ -244,15 +246,15 @@ func (r *Ruler) getOrCreateNotifier(userID string) (*notifier.Notifier, error) {
 
 // Evaluate a list of rules in the given context.
 func (r *Ruler) Evaluate(ctx context.Context, rs []rules.Rule) {
-	logger := util.WithContext(ctx)
-	logger.Debugf("Evaluating %d rules...", len(rs))
+	logger := util.WithContext(ctx, util.Logger)
+	level.Debug(logger).Log("msg", "evaluating rules...", "num_rules", len(rs))
 	start := time.Now()
 	g, err := r.newGroup(ctx, rs)
 	if err != nil {
-		logger.Errorf("Failed to create rule group: %v", err)
+		level.Error(logger).Log("msg", "failed to create rule group", "err", err)
 		return
 	}
-	g.Eval()
+	g.Eval(start)
 
 	// The prometheus routines we're calling have their own instrumentation
 	// but, a) it's rule-based, not group-based, b) it's a summary, not a
@@ -284,9 +286,7 @@ func NewServer(cfg Config, ruler *Ruler) (*Server, error) {
 		Timeout: cfg.ClientTimeout,
 	}
 	// TODO: Separate configuration for polling interval.
-	// N.B.: there is currently a race condition between rules evaluation and alerts scheduling,
-	// so we offset the interval, but only by a small amount, to minimise the odds of the race happening.
-	s := newScheduler(c, cfg.EvaluationInterval, cfg.EvaluationInterval+10*time.Millisecond)
+	s := newScheduler(c, cfg.EvaluationInterval, cfg.EvaluationInterval)
 	if cfg.NumWorkers <= 0 {
 		return nil, fmt.Errorf("must have at least 1 worker, got %d", cfg.NumWorkers)
 	}
@@ -308,7 +308,7 @@ func (s *Server) run() {
 	for _, w := range s.workers {
 		go w.Run()
 	}
-	log.Infof("Ruler up and running")
+	level.Info(util.Logger).Log("msg", "ruler up and running")
 }
 
 // Stop the server.
@@ -351,18 +351,18 @@ func (w *worker) Run() {
 		default:
 		}
 		blockedWorkers.Inc()
-		log.Debugf("Waiting for next work item")
+		level.Debug(util.Logger).Log("msg", "waiting for next work item")
 		item := w.scheduler.nextWorkItem()
 		blockedWorkers.Dec()
 		if item == nil {
-			log.Debugf("Queue closed and empty. Terminating worker.")
+			level.Debug(util.Logger).Log("msg", "queue closed and empty; terminating worker")
 			return
 		}
-		log.Debugf("Processing %v", item)
+		level.Debug(util.Logger).Log("msg", "processing item", "item", item)
 		ctx := user.InjectOrgID(context.Background(), item.userID)
 		w.ruler.Evaluate(ctx, item.rules)
 		w.scheduler.workItemDone(*item)
-		log.Debugf("%v handed back to queue", item)
+		level.Debug(util.Logger).Log("msg", "item handed back to queue", "item", item)
 	}
 }
 

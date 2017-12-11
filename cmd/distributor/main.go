@@ -3,13 +3,18 @@ package main
 import (
 	"flag"
 	"net/http"
+	"os"
 
+	"github.com/go-kit/kit/log/level"
+	"github.com/opentracing-contrib/go-stdlib/nethttp"
+	"github.com/opentracing/opentracing-go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/log"
 	"google.golang.org/grpc"
 
 	"github.com/weaveworks/common/middleware"
 	"github.com/weaveworks/common/server"
+	"github.com/weaveworks/common/tracing"
 	"github.com/weaveworks/cortex/pkg/distributor"
 	"github.com/weaveworks/cortex/pkg/ring"
 	"github.com/weaveworks/cortex/pkg/util"
@@ -43,32 +48,53 @@ func main() {
 		}
 		ringConfig        ring.Config
 		distributorConfig distributor.Config
+		logLevel          util.LogLevel
 	)
-	util.RegisterFlags(&serverConfig, &ringConfig, &distributorConfig)
+	util.RegisterFlags(&serverConfig, &ringConfig, &distributorConfig, &logLevel)
 	flag.Parse()
+
+	util.InitLogger(logLevel.AllowedLevel)
+
+	// Setting the environment variable JAEGER_AGENT_HOST enables tracing
+	jaegerAgentHost := os.Getenv("JAEGER_AGENT_HOST")
+	trace := tracing.New(jaegerAgentHost, "distributor")
+	defer trace.Close()
 
 	log.AddHook(promrus.MustNewPrometheusHook())
 
 	r, err := ring.New(ringConfig)
 	if err != nil {
-		log.Fatalf("Error initializing ring: %v", err)
+		level.Error(util.Logger).Log("msg", "error initializing ring", "err", err)
+		os.Exit(1)
 	}
 	defer r.Stop()
 
 	dist, err := distributor.New(distributorConfig, r)
 	if err != nil {
-		log.Fatalf("Error initializing distributor: %v", err)
+		level.Error(util.Logger).Log("msg", "error initializing distributor", "err", err)
+		os.Exit(1)
 	}
 	defer dist.Stop()
 	prometheus.MustRegister(dist)
 
 	server, err := server.New(serverConfig)
 	if err != nil {
-		log.Fatalf("Error initializing server: %v", err)
+		level.Error(util.Logger).Log("msg", "error initializing server", "err", err)
+		os.Exit(1)
 	}
 	defer server.Shutdown()
 
 	server.HTTP.Handle("/ring", r)
-	server.HTTP.Handle("/api/prom/push", middleware.AuthenticateUser.Wrap(http.HandlerFunc(dist.PushHandler)))
+
+	operationNameFunc := nethttp.OperationNameFunc(func(r *http.Request) string {
+		return r.URL.RequestURI()
+	})
+	server.HTTP.Handle("/api/prom/push", middleware.Merge(
+		middleware.Func(func(handler http.Handler) http.Handler {
+			return nethttp.Middleware(opentracing.GlobalTracer(), handler, operationNameFunc)
+		}),
+		middleware.AuthenticateUser,
+	).Wrap(http.HandlerFunc(dist.PushHandler)))
+
 	server.Run()
 }

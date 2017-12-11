@@ -2,6 +2,7 @@ package chunk
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io/ioutil"
 	"math/rand"
@@ -19,10 +20,9 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3iface"
-	"github.com/prometheus/common/log"
+	"github.com/go-kit/kit/log/level"
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/net/context"
 
 	"github.com/weaveworks/cortex/pkg/util"
 )
@@ -227,7 +227,7 @@ func (m *mockDynamoDBClient) queryRequest(_ context.Context, input *dynamodb.Que
 						continue
 					}
 				} else {
-					log.Warnf("Unsupported FilterExpression: %s", *input.FilterExpression)
+					level.Warn(util.Logger).Log("msg", "unsupported FilterExpression", "expression", *input.FilterExpression)
 				}
 			}
 		}
@@ -479,9 +479,11 @@ func TestAWSStorageClientChunks(t *testing.T) {
 	tests := []struct {
 		name           string
 		provisionedErr int
+		gangSize       int
 	}{
-		{"DynamoDB chunks", 0},
-		{"DynamoDB chunks retry logic", 2},
+		{"DynamoDB chunks", 0, 10},
+		{"DynamoDB chunks with parallel fetch disabled", 0, 0},
+		{"DynamoDB chunks retry logic", 2, 10},
 	}
 
 	for _, tt := range tests {
@@ -505,6 +507,9 @@ func TestAWSStorageClientChunks(t *testing.T) {
 			require.NoError(t, err)
 
 			client := awsStorageClient{
+				cfg: AWSStorageConfig{
+					DynamoDBConfig: DynamoDBConfig{DynamoDBChunkGangSize: tt.gangSize},
+				},
 				DynamoDB:                dynamoDB,
 				schemaCfg:               schemaConfig,
 				queryRequestFn:          dynamoDB.queryRequest,

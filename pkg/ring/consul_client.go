@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-kit/kit/log/level"
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/snappy"
 	consul "github.com/hashicorp/consul/api"
 	cleanhttp "github.com/hashicorp/go-cleanhttp"
-	"github.com/prometheus/common/log"
+
+	"github.com/weaveworks/cortex/pkg/util"
 )
 
 const (
@@ -137,14 +139,14 @@ func (c *consulClient) CAS(key string, f CASCallback) error {
 	for i := 0; i < retries; i++ {
 		kvp, _, err := c.kv.Get(key, queryOptions)
 		if err != nil {
-			log.Errorf("Error getting %s: %v", key, err)
+			level.Error(util.Logger).Log("msg", "error getting key", "key", key, "err", err)
 			continue
 		}
 		var intermediate interface{}
 		if kvp != nil {
 			out, err := c.codec.Decode(kvp.Value)
 			if err != nil {
-				log.Errorf("Error decoding %s: %v", key, err)
+				level.Error(util.Logger).Log("msg", "error decoding key", "key", key, "err", err)
 				continue
 			}
 			// If key doesn't exist, index will be 0.
@@ -154,7 +156,7 @@ func (c *consulClient) CAS(key string, f CASCallback) error {
 
 		intermediate, retry, err = f(intermediate)
 		if err != nil {
-			log.Errorf("Error CASing %s: %v", key, err)
+			level.Error(util.Logger).Log("msg", "error CASing", "key", key, "err", err)
 			if !retry {
 				return err
 			}
@@ -167,7 +169,7 @@ func (c *consulClient) CAS(key string, f CASCallback) error {
 
 		bytes, err := c.codec.Encode(intermediate)
 		if err != nil {
-			log.Errorf("Error serialising value for %s: %v", key, err)
+			level.Error(util.Logger).Log("msg", "error serialising value", "key", key, "err", err)
 			continue
 		}
 		ok, _, err := c.kv.CAS(&consul.KVPair{
@@ -176,11 +178,11 @@ func (c *consulClient) CAS(key string, f CASCallback) error {
 			ModifyIndex: index,
 		}, writeOptions)
 		if err != nil {
-			log.Errorf("Error CASing %s: %v", key, err)
+			level.Error(util.Logger).Log("msg", "error CASing", "ley", key, "err", err)
 			continue
 		}
 		if !ok {
-			log.Errorf("Error CASing %s, trying again %d", key, index)
+			level.Error(util.Logger).Log("msg", "error CASing, trying again", "key", key, "index", index)
 			continue
 		}
 		return nil
@@ -188,36 +190,9 @@ func (c *consulClient) CAS(key string, f CASCallback) error {
 	return fmt.Errorf("failed to CAS %s", key)
 }
 
-const (
-	initialBackoff = 1 * time.Second
-	maxBackoff     = 1 * time.Minute
-)
-
-type backoff struct {
-	done    <-chan struct{}
-	backoff time.Duration
-}
-
-func newBackoff(done <-chan struct{}) *backoff {
-	return &backoff{
-		done:    done,
-		backoff: initialBackoff,
-	}
-}
-
-func (b *backoff) reset() {
-	b.backoff = initialBackoff
-}
-
-func (b *backoff) wait() {
-	select {
-	case <-b.done:
-	case <-time.After(b.backoff):
-		b.backoff = b.backoff * 2
-		if b.backoff > maxBackoff {
-			b.backoff = maxBackoff
-		}
-	}
+var backoffConfig = util.BackoffConfig{
+	MinBackoff: 1 * time.Second,
+	MaxBackoff: 1 * time.Minute,
 }
 
 func isClosed(done <-chan struct{}) bool {
@@ -237,7 +212,7 @@ func isClosed(done <-chan struct{}) bool {
 // the done channel is closed.
 func (c *consulClient) WatchPrefix(prefix string, done <-chan struct{}, f func(string, interface{}) bool) {
 	var (
-		backoff = newBackoff(done)
+		backoff = util.NewBackoff(backoffConfig, done)
 		index   = uint64(0)
 	)
 	for {
@@ -250,11 +225,11 @@ func (c *consulClient) WatchPrefix(prefix string, done <-chan struct{}, f func(s
 			WaitTime:          c.longPollDuration,
 		})
 		if err != nil {
-			log.Errorf("Error getting path %s: %v", prefix, err)
-			backoff.wait()
+			level.Error(util.Logger).Log("msg", "error getting path", "prefix", prefix, "err", err)
+			backoff.Wait()
 			continue
 		}
-		backoff.reset()
+		backoff.Reset()
 
 		// Skip if the index is the same as last time, because the key value is
 		// guaranteed to be the same as last time
@@ -266,7 +241,7 @@ func (c *consulClient) WatchPrefix(prefix string, done <-chan struct{}, f func(s
 		for _, kvp := range kvps {
 			out, err := c.codec.Decode(kvp.Value)
 			if err != nil {
-				log.Errorf("Error decoding %s: %v", kvp.Key, err)
+				level.Error(util.Logger).Log("msg", "error decoding key", "key", kvp.Key, "err", err)
 				continue
 			}
 			if !f(kvp.Key, out) {
@@ -284,7 +259,7 @@ func (c *consulClient) WatchPrefix(prefix string, done <-chan struct{}, f func(s
 // the done channel is closed.
 func (c *consulClient) WatchKey(key string, done <-chan struct{}, f func(interface{}) bool) {
 	var (
-		backoff = newBackoff(done)
+		backoff = util.NewBackoff(backoffConfig, done)
 		index   = uint64(0)
 	)
 	for {
@@ -297,11 +272,11 @@ func (c *consulClient) WatchKey(key string, done <-chan struct{}, f func(interfa
 			WaitTime:          c.longPollDuration,
 		})
 		if err != nil || kvp == nil {
-			log.Errorf("Error getting path %s: %v", key, err)
-			backoff.wait()
+			level.Error(util.Logger).Log("msg", "error getting path", "key", key, "err", err)
+			backoff.Wait()
 			continue
 		}
-		backoff.reset()
+		backoff.Reset()
 
 		// Skip if the index is the same as last time, because the key value is
 		// guaranteed to be the same as last time
@@ -312,7 +287,7 @@ func (c *consulClient) WatchKey(key string, done <-chan struct{}, f func(interfa
 
 		out, err := c.codec.Decode(kvp.Value)
 		if err != nil {
-			log.Errorf("Error decoding %s: %v", key, err)
+			level.Error(util.Logger).Log("msg", "error decoding key", "key", key, "err", err)
 			continue
 		}
 		if !f(out) {

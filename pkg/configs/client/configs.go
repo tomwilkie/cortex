@@ -8,11 +8,12 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/go-kit/kit/log/level"
 	"github.com/prometheus/alertmanager/config"
-	"github.com/prometheus/common/log"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/rules"
 	"github.com/weaveworks/cortex/pkg/configs"
+	"github.com/weaveworks/cortex/pkg/util"
 )
 
 // TODO: Extract configs client logic into go client library (ala users)
@@ -28,7 +29,7 @@ type ConfigsResponse struct {
 func configsFromJSON(body io.Reader) (*ConfigsResponse, error) {
 	var configs ConfigsResponse
 	if err := json.NewDecoder(body).Decode(&configs); err != nil {
-		log.Errorf("configs: couldn't decode JSON body: %v", err)
+		level.Error(util.Logger).Log("msg", "configs: couldn't decode JSON body", "err", err)
 		return nil, err
 	}
 	return &configs, nil
@@ -61,7 +62,7 @@ func RulesFromConfig(c configs.Config) ([]rules.Rule, error) {
 
 			switch r := stmt.(type) {
 			case *promql.AlertStmt:
-				rule = rules.NewAlertingRule(r.Name, r.Expr, r.Duration, r.Labels, r.Annotations)
+				rule = rules.NewAlertingRule(r.Name, r.Expr, r.Duration, r.Labels, r.Annotations, util.Logger)
 
 			case *promql.RecordStmt:
 				rule = rules.NewRecordingRule(r.Name, r.Expr, r.Labels)

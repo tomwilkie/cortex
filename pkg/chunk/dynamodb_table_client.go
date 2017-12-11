@@ -1,8 +1,8 @@
 package chunk
 
 import (
+	"context"
 	"fmt"
-	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
@@ -10,8 +10,8 @@ import (
 	"github.com/aws/aws-sdk-go/service/applicationautoscaling/applicationautoscalingiface"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
+	"github.com/go-kit/kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
-	"golang.org/x/net/context"
 	"golang.org/x/time/rate"
 
 	"github.com/weaveworks/common/instrument"
@@ -66,13 +66,12 @@ func (d dynamoTableClient) backoffAndRetry(ctx context.Context, fn func(context.
 		d.limiter.Wait(ctx)
 	}
 
-	backoff, numRetries := minBackoff, 10
-	for i := 0; i < numRetries; i++ {
+	backoff := util.NewBackoff(backoffConfig, ctx.Done())
+	for backoff.Ongoing() {
 		if err := fn(ctx); err != nil {
 			if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == "ThrottlingException" {
-				util.WithContext(ctx).Errorf("Got error %v on try %d, backing off and retrying.", err, i)
-				time.Sleep(backoff)
-				backoff = nextBackoff(backoff)
+				level.Warn(util.WithContext(ctx, util.Logger)).Log("msg", "got error, backing off and retrying", "err", err, "retry", backoff.NumRetries())
+				backoff.Wait()
 				continue
 			} else {
 				return err
@@ -80,7 +79,7 @@ func (d dynamoTableClient) backoffAndRetry(ctx context.Context, fn func(context.
 		}
 		return nil
 	}
-	return fmt.Errorf("retried %d times, failing", numRetries)
+	return fmt.Errorf("retried %d times, failing", backoff.NumRetries())
 }
 
 func (d dynamoTableClient) ListTables(ctx context.Context) ([]string, error) {
