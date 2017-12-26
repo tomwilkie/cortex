@@ -9,7 +9,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
-	"github.com/weaveworks/cortex/pkg/prom1/storage/local/chunk"
+	promchunk "github.com/weaveworks/cortex/pkg/prom1/storage/local/chunk"
 	"github.com/weaveworks/cortex/pkg/util"
 )
 
@@ -25,14 +25,17 @@ func dummyChunk() Chunk {
 
 func dummyChunkFor(metric model.Metric) Chunk {
 	now := model.Now()
-	cs, _ := chunk.New().Add(model.SamplePair{Timestamp: now, Value: 0})
+	cs, _ := promchunk.New().Add(model.SamplePair{Timestamp: now, Value: 0})
 	chunk := NewChunk(
-		userID,
-		metric.Fingerprint(),
-		metric,
+		Descriptor{
+			UserID:      userID,
+			Fingerprint: metric.Fingerprint(),
+			Metric:      metric,
+			From:        now.Add(-time.Hour),
+			Through:     now,
+			Encoding:    promchunk.DefaultEncoding,
+		},
 		cs[0],
-		now.Add(-time.Hour),
-		now,
 	)
 	// Force checksum calculation.
 	_, err := chunk.Encode()
@@ -46,7 +49,7 @@ func TestChunkCodec(t *testing.T) {
 	for i, c := range []struct {
 		chunk Chunk
 		err   error
-		f     func(*Chunk, []byte)
+		f     func(*Descriptor, []byte)
 	}{
 		// Basic round trip
 		{chunk: dummyChunk()},
@@ -55,46 +58,47 @@ func TestChunkCodec(t *testing.T) {
 		{
 			chunk: dummyChunk(),
 			err:   ErrInvalidChecksum,
-			f:     func(_ *Chunk, buf []byte) { buf[4]++ },
+			f:     func(_ *Descriptor, buf []byte) { buf[4]++ },
 		},
 
 		// Checksum should fail
 		{
 			chunk: dummyChunk(),
 			err:   ErrInvalidChecksum,
-			f:     func(c *Chunk, _ []byte) { c.Checksum = 123 },
+			f:     func(d *Descriptor, _ []byte) { d.Checksum = 123 },
 		},
 
 		// Metadata test should fail
 		{
 			chunk: dummyChunk(),
 			err:   ErrWrongMetadata,
-			f:     func(c *Chunk, _ []byte) { c.Fingerprint++ },
+			f:     func(d *Descriptor, _ []byte) { d.Fingerprint++ },
 		},
 
 		// Metadata test should fail
 		{
 			chunk: dummyChunk(),
 			err:   ErrWrongMetadata,
-			f:     func(c *Chunk, _ []byte) { c.UserID = "foo" },
+			f:     func(d *Descriptor, _ []byte) { d.UserID = "foo" },
 		},
 	} {
 		t.Run(fmt.Sprintf("[%d]", i), func(t *testing.T) {
 			buf, err := c.chunk.Encode()
 			require.NoError(t, err)
 
-			have, err := parseExternalKey(userID, c.chunk.ExternalKey())
+			desc, err := parseExternalKey(userID, c.chunk.Descriptor().ExternalKey())
 			require.NoError(t, err)
 
 			if c.f != nil {
-				c.f(&have, buf)
+				c.f(&desc, buf)
 			}
 
-			err = have.Decode(buf)
+			chunk := NewChunk(desc, nil)
+			err = chunk.Decode(buf)
 			require.Equal(t, c.err, errors.Cause(err))
 
 			if c.err == nil {
-				require.Equal(t, have, c.chunk)
+				require.Equal(t, c.chunk, chunk)
 			}
 		})
 	}
@@ -102,18 +106,18 @@ func TestChunkCodec(t *testing.T) {
 
 func TestParseExternalKey(t *testing.T) {
 	for _, c := range []struct {
-		key   string
-		chunk Chunk
-		err   error
+		key  string
+		desc Descriptor
+		err  error
 	}{
-		{key: "2:1484661279394:1484664879394", chunk: Chunk{
+		{key: "2:1484661279394:1484664879394", desc: Descriptor{
 			UserID:      userID,
 			Fingerprint: model.Fingerprint(2),
 			From:        model.Time(1484661279394),
 			Through:     model.Time(1484664879394),
 		}},
 
-		{key: userID + "/2:270d8f00:270d8f00:f84c5745", chunk: Chunk{
+		{key: userID + "/2:270d8f00:270d8f00:f84c5745", desc: Descriptor{
 			UserID:      userID,
 			Fingerprint: model.Fingerprint(2),
 			From:        model.Time(655200000),
@@ -122,11 +126,11 @@ func TestParseExternalKey(t *testing.T) {
 			Checksum:    4165752645,
 		}},
 
-		{key: "invalidUserID/2:270d8f00:270d8f00:f84c5745", chunk: Chunk{}, err: ErrWrongMetadata},
+		{key: "invalidUserID/2:270d8f00:270d8f00:f84c5745", desc: Descriptor{}, err: ErrWrongMetadata},
 	} {
-		chunk, err := parseExternalKey(userID, c.key)
+		desc, err := parseExternalKey(userID, c.key)
 		require.Equal(t, c.err, errors.Cause(err))
-		require.Equal(t, c.chunk, chunk)
+		require.Equal(t, c.desc, desc)
 	}
 }
 
@@ -145,7 +149,7 @@ func TestChunksToMatrix(t *testing.T) {
 	require.NoError(t, err)
 
 	ss1 := &model.SampleStream{
-		Metric: chunk1.Metric,
+		Metric: chunk1.Descriptor().Metric,
 		Values: util.MergeSampleSets(chunk1Samples, chunk2Samples),
 	}
 
@@ -160,7 +164,7 @@ func TestChunksToMatrix(t *testing.T) {
 	require.NoError(t, err)
 
 	ss2 := &model.SampleStream{
-		Metric: chunk3.Metric,
+		Metric: chunk3.Descriptor().Metric,
 		Values: chunk3Samples,
 	}
 

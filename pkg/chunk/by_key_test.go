@@ -7,19 +7,19 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func c(id string) Chunk {
-	return Chunk{UserID: id}
+func c(id string) Descriptor {
+	return Descriptor{UserID: id}
 }
 
 func TestUnique(t *testing.T) {
 	for _, tc := range []struct {
-		in   ByKey
-		want ByKey
+		in   DescByKey
+		want DescByKey
 	}{
-		{nil, ByKey{}},
-		{ByKey{c("a"), c("a")}, ByKey{c("a")}},
-		{ByKey{c("a"), c("a"), c("b"), c("b"), c("c")}, ByKey{c("a"), c("b"), c("c")}},
-		{ByKey{c("a"), c("b"), c("c")}, ByKey{c("a"), c("b"), c("c")}},
+		{nil, DescByKey{}},
+		{DescByKey{c("a"), c("a")}, DescByKey{c("a")}},
+		{DescByKey{c("a"), c("a"), c("b"), c("b"), c("c")}, DescByKey{c("a"), c("b"), c("c")}},
+		{DescByKey{c("a"), c("b"), c("c")}, DescByKey{c("a"), c("b"), c("c")}},
 	} {
 		have := unique(tc.in)
 		if !reflect.DeepEqual(tc.want, have) {
@@ -30,20 +30,20 @@ func TestUnique(t *testing.T) {
 
 func TestMerge(t *testing.T) {
 	type args struct {
-		a ByKey
-		b ByKey
+		a DescByKey
+		b DescByKey
 	}
 	for _, tc := range []struct {
 		args args
-		want ByKey
+		want DescByKey
 	}{
-		{args{ByKey{}, ByKey{}}, ByKey{}},
-		{args{ByKey{c("a")}, ByKey{}}, ByKey{c("a")}},
-		{args{ByKey{}, ByKey{c("b")}}, ByKey{c("b")}},
-		{args{ByKey{c("a")}, ByKey{c("b")}}, ByKey{c("a"), c("b")}},
+		{args{DescByKey{}, DescByKey{}}, DescByKey{}},
+		{args{DescByKey{c("a")}, DescByKey{}}, DescByKey{c("a")}},
+		{args{DescByKey{}, DescByKey{c("b")}}, DescByKey{c("b")}},
+		{args{DescByKey{c("a")}, DescByKey{c("b")}}, DescByKey{c("a"), c("b")}},
 		{
-			args{ByKey{c("a"), c("c")}, ByKey{c("a"), c("b"), c("d")}},
-			ByKey{c("a"), c("b"), c("c"), c("d")},
+			args{DescByKey{c("a"), c("c")}, DescByKey{c("a"), c("b"), c("d")}},
+			DescByKey{c("a"), c("b"), c("c"), c("d")},
 		},
 	} {
 		have := merge(tc.args.a, tc.args.b)
@@ -55,22 +55,22 @@ func TestMerge(t *testing.T) {
 
 func TestNWayUnion(t *testing.T) {
 	for _, tc := range []struct {
-		in   []ByKey
-		want ByKey
+		in   []DescByKey
+		want DescByKey
 	}{
-		{nil, ByKey{}},
-		{[]ByKey{{c("a")}}, ByKey{c("a")}},
-		{[]ByKey{{c("a")}, {c("a")}}, ByKey{c("a")}},
-		{[]ByKey{{c("a")}, {}}, ByKey{c("a")}},
-		{[]ByKey{{}, {c("b")}}, ByKey{c("b")}},
-		{[]ByKey{{c("a")}, {c("b")}}, ByKey{c("a"), c("b")}},
+		{nil, DescByKey{}},
+		{[]DescByKey{{c("a")}}, DescByKey{c("a")}},
+		{[]DescByKey{{c("a")}, {c("a")}}, DescByKey{c("a")}},
+		{[]DescByKey{{c("a")}, {}}, DescByKey{c("a")}},
+		{[]DescByKey{{}, {c("b")}}, DescByKey{c("b")}},
+		{[]DescByKey{{c("a")}, {c("b")}}, DescByKey{c("a"), c("b")}},
 		{
-			[]ByKey{{c("a"), c("c"), c("e")}, {c("c"), c("d")}, {c("b")}},
-			ByKey{c("a"), c("b"), c("c"), c("d"), c("e")},
+			[]DescByKey{{c("a"), c("c"), c("e")}, {c("c"), c("d")}, {c("b")}},
+			DescByKey{c("a"), c("b"), c("c"), c("d"), c("e")},
 		},
 		{
-			[]ByKey{{c("c"), c("d")}, {c("b")}, {c("a"), c("c"), c("e")}},
-			ByKey{c("a"), c("b"), c("c"), c("d"), c("e")},
+			[]DescByKey{{c("c"), c("d")}, {c("b")}, {c("a"), c("c"), c("e")}},
+			DescByKey{c("a"), c("b"), c("c"), c("d"), c("e")},
 		},
 	} {
 		have := nWayUnion(tc.in)
@@ -82,14 +82,14 @@ func TestNWayUnion(t *testing.T) {
 
 func TestNWayIntersect(t *testing.T) {
 	for _, tc := range []struct {
-		in   []ByKey
-		want ByKey
+		in   []DescByKey
+		want DescByKey
 	}{
-		{nil, ByKey{}},
-		{[]ByKey{{c("a"), c("b"), c("c")}}, []Chunk{c("a"), c("b"), c("c")}},
-		{[]ByKey{{c("a"), c("b"), c("c")}, {c("a"), c("c")}}, ByKey{c("a"), c("c")}},
-		{[]ByKey{{c("a"), c("b"), c("c")}, {c("a"), c("c")}, {c("b")}}, ByKey{}},
-		{[]ByKey{{c("a"), c("b"), c("c")}, {c("a"), c("c")}, {c("a")}}, ByKey{c("a")}},
+		{nil, DescByKey{}},
+		{[]DescByKey{{c("a"), c("b"), c("c")}}, []Descriptor{c("a"), c("b"), c("c")}},
+		{[]DescByKey{{c("a"), c("b"), c("c")}, {c("a"), c("c")}}, DescByKey{c("a"), c("c")}},
+		{[]DescByKey{{c("a"), c("b"), c("c")}, {c("a"), c("c")}, {c("b")}}, DescByKey{}},
+		{[]DescByKey{{c("a"), c("b"), c("c")}, {c("a"), c("c")}, {c("a")}}, DescByKey{c("a")}},
 	} {
 		have := nWayIntersect(tc.in)
 		if !reflect.DeepEqual(tc.want, have) {

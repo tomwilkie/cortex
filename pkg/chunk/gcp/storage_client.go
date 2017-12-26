@@ -172,8 +172,8 @@ func (s *storageClient) PutChunks(ctx context.Context, chunks []chunk.Chunk) err
 		if err != nil {
 			return err
 		}
-		key := chunks[i].ExternalKey()
-		tableName := s.schemaCfg.ChunkTables.TableFor(chunks[i].From)
+		key := chunks[i].Descriptor().ExternalKey()
+		tableName := s.schemaCfg.ChunkTables.TableFor(chunks[i].Descriptor().From)
 		keys[tableName] = append(keys[tableName], key)
 
 		mut := bigtable.NewMutation()
@@ -196,21 +196,21 @@ func (s *storageClient) PutChunks(ctx context.Context, chunks []chunk.Chunk) err
 	return nil
 }
 
-func (s *storageClient) GetChunks(ctx context.Context, input []chunk.Chunk) ([]chunk.Chunk, error) {
+func (s *storageClient) GetChunks(ctx context.Context, descs []chunk.Descriptor) ([]chunk.Chunk, error) {
 	chunks := map[string]map[string]chunk.Chunk{}
 	keys := map[string]bigtable.RowList{}
-	for _, c := range input {
-		tableName := s.schemaCfg.ChunkTables.TableFor(c.From)
-		key := c.ExternalKey()
+	for _, desc := range descs {
+		tableName := s.schemaCfg.ChunkTables.TableFor(desc.From)
+		key := desc.ExternalKey()
 		keys[tableName] = append(keys[tableName], key)
 		if _, ok := chunks[tableName]; !ok {
 			chunks[tableName] = map[string]chunk.Chunk{}
 		}
-		chunks[tableName][key] = c
+		chunks[tableName][key] = chunk.NewChunk(desc, nil)
 	}
 
-	outs := make(chan chunk.Chunk, len(input))
-	errs := make(chan error, len(input))
+	outs := make(chan chunk.Chunk, len(descs))
+	errs := make(chan error, len(descs))
 
 	for tableName := range keys {
 		var (
@@ -245,8 +245,8 @@ func (s *storageClient) GetChunks(ctx context.Context, input []chunk.Chunk) ([]c
 		}
 	}
 
-	output := make([]chunk.Chunk, 0, len(input))
-	for i := 0; i < len(input); i++ {
+	output := make([]chunk.Chunk, 0, len(descs))
+	for i := 0; i < len(descs); i++ {
 		select {
 		case c := <-outs:
 			output = append(output, c)

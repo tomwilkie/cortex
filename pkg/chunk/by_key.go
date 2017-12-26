@@ -1,28 +1,39 @@
 package chunk
 
-// ByKey allow you to sort chunks by ID
+// DescByKey allow you to sort chunks by ID
 type ByKey []Chunk
 
-func (cs ByKey) Len() int           { return len(cs) }
-func (cs ByKey) Swap(i, j int)      { cs[i], cs[j] = cs[j], cs[i] }
-func (cs ByKey) Less(i, j int) bool { return cs[i].ExternalKey() < cs[j].ExternalKey() }
+func (cs ByKey) Len() int      { return len(cs) }
+func (cs ByKey) Swap(i, j int) { cs[i], cs[j] = cs[j], cs[i] }
+func (cs ByKey) Less(i, j int) bool {
+	return cs[i].Descriptor().ExternalKey() < cs[j].Descriptor().ExternalKey()
+}
+
+// DescByKey allow you to sort Descriptors by ID
+type DescByKey []Descriptor
+
+func (ds DescByKey) Len() int      { return len(ds) }
+func (ds DescByKey) Swap(i, j int) { ds[i], ds[j] = ds[j], ds[i] }
+func (ds DescByKey) Less(i, j int) bool {
+	return ds[i].ExternalKey() < ds[j].ExternalKey()
+}
 
 // unique will remove duplicates from the input.
 // list must be sorted.
-func unique(cs ByKey) ByKey {
-	if len(cs) == 0 {
-		return ByKey{}
+func unique(ds DescByKey) DescByKey {
+	if len(ds) == 0 {
+		return DescByKey{}
 	}
 
-	result := make(ByKey, 1, len(cs))
-	result[0] = cs[0]
+	result := make(DescByKey, 1, len(ds))
+	result[0] = ds[0]
 	i, j := 0, 1
-	for j < len(cs) {
-		if result[i].ExternalKey() == cs[j].ExternalKey() {
+	for j < len(ds) {
+		if result[i].ExternalKey() == ds[j].ExternalKey() {
 			j++
 			continue
 		}
-		result = append(result, cs[j])
+		result = append(result, ds[j])
 		i++
 		j++
 	}
@@ -31,8 +42,8 @@ func unique(cs ByKey) ByKey {
 
 // merge will merge & dedupe two lists of chunks.
 // list musts be sorted and not contain dupes.
-func merge(a, b ByKey) ByKey {
-	result := make(ByKey, 0, len(a)+len(b))
+func merge(a, b DescByKey) DescByKey {
+	result := make(DescByKey, 0, len(a)+len(b))
 	i, j := 0, 0
 	for i < len(a) && j < len(b) {
 		if a[i].ExternalKey() < b[j].ExternalKey() {
@@ -56,13 +67,31 @@ func merge(a, b ByKey) ByKey {
 	return result
 }
 
+func intersect(a, b DescByKey) DescByKey {
+	var (
+		i, j   = 0, 0
+		result = DescByKey{}
+	)
+	for i < len(a) && j < len(b) {
+		if a[i].ExternalKey() == b[j].ExternalKey() {
+			result = append(result, a[i])
+		}
+		if a[i].ExternalKey() < b[j].ExternalKey() {
+			i++
+		} else {
+			j++
+		}
+	}
+	return result
+}
+
 // nWayUnion will merge and dedupe n lists of chunks.
 // lists must be sorted and not contain dupes.
-func nWayUnion(sets []ByKey) ByKey {
+func nWayUnion(sets []DescByKey) DescByKey {
 	l := len(sets)
 	switch l {
 	case 0:
-		return ByKey{}
+		return DescByKey{}
 	case 1:
 		return sets[0]
 	case 2:
@@ -73,42 +102,26 @@ func nWayUnion(sets []ByKey) ByKey {
 			left  = nWayUnion(sets[:split])
 			right = nWayUnion(sets[split:])
 		)
-		return nWayUnion([]ByKey{left, right})
+		return merge(left, right)
 	}
 }
 
 // nWayIntersect will interesct n sorted lists of chunks.
-func nWayIntersect(sets []ByKey) ByKey {
+func nWayIntersect(sets []DescByKey) DescByKey {
 	l := len(sets)
 	switch l {
 	case 0:
-		return ByKey{}
+		return DescByKey{}
 	case 1:
 		return sets[0]
 	case 2:
-		var (
-			left, right = sets[0], sets[1]
-			i, j        = 0, 0
-			result      = []Chunk{}
-		)
-		for i < len(left) && j < len(right) {
-			if left[i].ExternalKey() == right[j].ExternalKey() {
-				result = append(result, left[i])
-			}
-
-			if left[i].ExternalKey() < right[j].ExternalKey() {
-				i++
-			} else {
-				j++
-			}
-		}
-		return result
+		return intersect(sets[0], sets[1])
 	default:
 		var (
 			split = l / 2
 			left  = nWayIntersect(sets[:split])
 			right = nWayIntersect(sets[split:])
 		)
-		return nWayIntersect([]ByKey{left, right})
+		return intersect(left, right)
 	}
 }

@@ -133,16 +133,16 @@ func memcacheStatusCode(err error) string {
 }
 
 // FetchChunkData gets chunks from the chunk cache.
-func (c *Cache) FetchChunkData(ctx context.Context, chunks []Chunk) (found []Chunk, missing []Chunk, err error) {
+func (c *Cache) FetchChunkData(ctx context.Context, descs []Descriptor) (found []Chunk, missing []Descriptor, err error) {
 	if c.memcache == nil {
-		return nil, chunks, nil
+		return nil, descs, nil
 	}
 
-	memcacheRequests.Add(float64(len(chunks)))
+	memcacheRequests.Add(float64(len(descs)))
 
-	keys := make([]string, 0, len(chunks))
-	for _, chunk := range chunks {
-		keys = append(keys, chunk.ExternalKey())
+	keys := make([]string, 0, len(descs))
+	for _, desc := range descs {
+		keys = append(keys, desc.ExternalKey())
 	}
 
 	var items map[string]*memcache.Item
@@ -152,24 +152,25 @@ func (c *Cache) FetchChunkData(ctx context.Context, chunks []Chunk) (found []Chu
 		return err
 	})
 	if err != nil {
-		return nil, chunks, err
+		return nil, descs, err
 	}
 
 	for i, externalKey := range keys {
 		item, ok := items[externalKey]
 		if !ok {
-			missing = append(missing, chunks[i])
+			missing = append(missing, descs[i])
 			continue
 		}
 
-		if err := chunks[i].Decode(item.Value); err != nil {
+		chunk := NewChunk(descs[i], nil)
+		if err := chunk.Decode(item.Value); err != nil {
 			memcacheCorrupt.Inc()
 			level.Error(util.WithContext(ctx, util.Logger)).Log("msg", "failed to decode chunk from cache", "err", err)
-			missing = append(missing, chunks[i])
+			missing = append(missing, descs[i])
 			continue
 		}
 
-		found = append(found, chunks[i])
+		found = append(found, chunk)
 	}
 
 	memcacheHits.Add(float64(len(found)))

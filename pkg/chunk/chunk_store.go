@@ -120,12 +120,13 @@ func (c *Store) calculateDynamoWrites(userID string, chunks []Chunk) (WriteBatch
 
 	writeReqs := c.storage.NewWriteBatch()
 	for _, chunk := range chunks {
-		metricName, err := util.ExtractMetricNameFromMetric(chunk.Metric)
+		descriptor := chunk.Descriptor()
+		metricName, err := util.ExtractMetricNameFromMetric(descriptor.Metric)
 		if err != nil {
 			return nil, err
 		}
 
-		entries, err := c.schema.GetWriteEntries(chunk.From, chunk.Through, userID, metricName, chunk.Metric, chunk.ExternalKey())
+		entries, err := c.schema.GetWriteEntries(descriptor.From, descriptor.Through, userID, metricName, descriptor.Metric, descriptor.ExternalKey())
 		if err != nil {
 			return nil, err
 		}
@@ -189,18 +190,18 @@ func (c *Store) getMetricNameMatrix(ctx context.Context, from, through model.Tim
 func (c *Store) getMetricNameChunks(ctx context.Context, from, through model.Time, allMatchers []*labels.Matcher, metricName string) ([]Chunk, error) {
 	logger := util.WithContext(ctx, util.Logger)
 	filters, matchers := util.SplitFiltersAndMatchers(allMatchers)
-	chunks, err := c.lookupChunksByMetricName(ctx, from, through, matchers, metricName)
+	descs, err := c.lookupChunksByMetricName(ctx, from, through, matchers, metricName)
 	if err != nil {
 		return nil, err
 	}
 
 	// Filter out chunks that are not in the selected time range.
-	filtered := make([]Chunk, 0, len(chunks))
-	for _, chunk := range chunks {
-		if chunk.Through < from || through < chunk.From {
+	filtered := make([]Descriptor, 0, len(descs))
+	for _, desc := range descs {
+		if desc.Through < from || through < desc.From {
 			continue
 		}
-		filtered = append(filtered, chunk)
+		filtered = append(filtered, desc)
 	}
 
 	// Now fetch the actual chunk data from Memcache / S3
@@ -230,7 +231,7 @@ func (c *Store) getMetricNameChunks(ctx context.Context, from, through model.Tim
 outer:
 	for _, chunk := range allChunks {
 		for _, filter := range filters {
-			if !filter.Matches(string(chunk.Metric[model.LabelName(filter.Name)])) {
+			if !filter.Matches(string(chunk.Descriptor().Metric[model.LabelName(filter.Name)])) {
 				continue outer
 			}
 		}
@@ -296,7 +297,7 @@ outer:
 		for _, chunk := range cs {
 			// getMetricNameChunks() may have selected too many metrics - metrics that match all matchers,
 			// but also have additional labels. We don't want to return those.
-			if chunk.Metric.Equal(metric) {
+			if chunk.Descriptor().Metric.Equal(metric) {
 				chunks = append(chunks, chunk)
 			}
 		}
@@ -304,7 +305,7 @@ outer:
 	return chunksToMatrix(chunks)
 }
 
-func (c *Store) lookupChunksByMetricName(ctx context.Context, from, through model.Time, matchers []*labels.Matcher, metricName string) ([]Chunk, error) {
+func (c *Store) lookupChunksByMetricName(ctx context.Context, from, through model.Time, matchers []*labels.Matcher, metricName string) ([]Descriptor, error) {
 	userID, err := user.ExtractOrgID(ctx)
 	if err != nil {
 		return nil, err
@@ -326,7 +327,7 @@ func (c *Store) lookupChunksByMetricName(ctx context.Context, from, through mode
 	}
 
 	// Otherwise get chunks which include other matchers
-	incomingChunkSets := make(chan ByKey)
+	incomingDescSets := make(chan DescByKey)
 	incomingErrors := make(chan error)
 	for _, matcher := range matchers {
 		go func(matcher *labels.Matcher) {
@@ -351,29 +352,29 @@ func (c *Store) lookupChunksByMetricName(ctx context.Context, from, through mode
 			}
 
 			// Convert IndexEntry's into chunks
-			chunks, err := c.convertIndexEntriesToChunks(ctx, entries, matcher)
+			descs, err := c.convertIndexEntriesToChunks(ctx, entries, matcher)
 			if err != nil {
 				incomingErrors <- err
 			} else {
-				incomingChunkSets <- chunks
+				incomingDescSets <- descs
 			}
 		}(matcher)
 	}
 
 	// Receive chunkSets from all matchers
-	var chunkSets []ByKey
+	var descSets []DescByKey
 	var lastErr error
 	for i := 0; i < len(matchers); i++ {
 		select {
-		case incoming := <-incomingChunkSets:
-			chunkSets = append(chunkSets, incoming)
+		case incoming := <-incomingDescSets:
+			descSets = append(descSets, incoming)
 		case err := <-incomingErrors:
 			lastErr = err
 		}
 	}
 
 	// Merge chunkSets in order because we wish to keep label series together consecutively
-	return nWayIntersect(chunkSets), lastErr
+	return nWayIntersect(descSets), lastErr
 }
 
 func (c *Store) lookupEntriesByQueries(ctx context.Context, queries []IndexQuery) ([]IndexEntry, error) {
@@ -426,13 +427,13 @@ func (c *Store) lookupEntriesByQuery(ctx context.Context, query IndexQuery) ([]I
 	return entries, nil
 }
 
-func (c *Store) convertIndexEntriesToChunks(ctx context.Context, entries []IndexEntry, matcher *labels.Matcher) (ByKey, error) {
+func (c *Store) convertIndexEntriesToChunks(ctx context.Context, entries []IndexEntry, matcher *labels.Matcher) ([]Descriptor, error) {
 	userID, err := user.ExtractOrgID(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	var chunkSet ByKey
+	var descs []Descriptor
 
 	for _, entry := range entries {
 		chunkKey, labelValue, metadataInIndex, err := parseChunkTimeRangeValue(entry.RangeValue, entry.Value)
@@ -440,30 +441,30 @@ func (c *Store) convertIndexEntriesToChunks(ctx context.Context, entries []Index
 			return nil, err
 		}
 
-		chunk, err := parseExternalKey(userID, chunkKey)
+		desc, err := parseExternalKey(userID, chunkKey)
 		if err != nil {
 			return nil, err
 		}
 
-		// This can be removed in Dev 2017, 13 months after the last chunks
+		// This can be removed in Dec 2017, 13 months after the last chunks
 		// was written with metadata in the index.
 		if metadataInIndex && entry.Value != nil {
-			if err := json.Unmarshal(entry.Value, &chunk); err != nil {
+			if err := json.Unmarshal(entry.Value, &desc); err != nil {
 				return nil, err
 			}
-			chunk.metadataInIndex = true
+			desc.metadataInIndex = true
 		}
 
 		if matcher != nil && !matcher.Matches(string(labelValue)) {
-			level.Debug(util.WithContext(ctx, util.Logger)).Log("msg", "dropping chunk for non-matching metric", "metric", chunk.Metric)
+			level.Debug(util.WithContext(ctx, util.Logger)).Log("msg", "dropping chunk for non-matching metric", "metric", desc.Metric)
 			continue
 		}
-		chunkSet = append(chunkSet, chunk)
+		descs = append(descs, desc)
 	}
 
 	// Return chunks sorted and deduped because they will be merged with other sets
-	sort.Sort(chunkSet)
-	return unique(chunkSet), nil
+	sort.Sort(DescByKey(descs))
+	return unique(descs), nil
 }
 
 func (c *Store) writeBackCache(_ context.Context, chunks []Chunk) error {
@@ -472,7 +473,7 @@ func (c *Store) writeBackCache(_ context.Context, chunks []Chunk) error {
 		if err != nil {
 			return err
 		}
-		c.cache.BackgroundWrite(chunks[i].ExternalKey(), encoded)
+		c.cache.BackgroundWrite(chunks[i].Descriptor().ExternalKey(), encoded)
 	}
 	return nil
 }

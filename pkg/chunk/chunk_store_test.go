@@ -13,7 +13,7 @@ import (
 	"github.com/prometheus/prometheus/promql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/weaveworks/cortex/pkg/prom1/storage/local/chunk"
+	promchunk "github.com/weaveworks/cortex/pkg/prom1/storage/local/chunk"
 	"github.com/weaveworks/cortex/pkg/util"
 	"golang.org/x/net/context"
 
@@ -40,7 +40,7 @@ func createSampleStreamFrom(chunk Chunk) (*model.SampleStream, error) {
 		return nil, err
 	}
 	return &model.SampleStream{
-		Metric: chunk.Metric,
+		Metric: chunk.Descriptor().Metric,
 		Values: samples,
 	}, nil
 }
@@ -384,20 +384,22 @@ func TestChunkStoreRandom(t *testing.T) {
 	const chunkLen = 13 * 3600 // in seconds
 	for i := 0; i < 100; i++ {
 		ts := model.TimeFromUnix(int64(i * chunkLen))
-		chunks, _ := chunk.New().Add(model.SamplePair{
+		chunks, _ := promchunk.New().Add(model.SamplePair{
 			Timestamp: ts,
 			Value:     model.SampleValue(float64(i)),
 		})
 		chunk := NewChunk(
-			userID,
-			model.Fingerprint(1),
-			model.Metric{
-				model.MetricNameLabel: "foo",
-				"bar": "baz",
+			Descriptor{
+				UserID:      userID,
+				Fingerprint: model.Fingerprint(1),
+				Metric: model.Metric{
+					model.MetricNameLabel: "foo",
+					"bar": "baz",
+				},
+				From:    ts,
+				Through: ts.Add(chunkLen * time.Second),
 			},
 			chunks[0],
-			ts,
-			ts.Add(chunkLen*time.Second),
 		)
 		for _, s := range schemas {
 			err := s.store.Put(ctx, []Chunk{chunk})
@@ -426,8 +428,8 @@ func TestChunkStoreRandom(t *testing.T) {
 
 			// We need to check that each chunk is in the time range
 			for _, chunk := range chunks {
-				assert.False(t, chunk.From.After(endTime))
-				assert.False(t, chunk.Through.Before(startTime))
+				assert.False(t, chunk.Descriptor().From.After(endTime))
+				assert.False(t, chunk.Descriptor().Through.Before(startTime))
 				samples, err := chunk.Samples()
 				assert.NoError(t, err)
 				assert.Equal(t, 1, len(samples))
@@ -452,20 +454,22 @@ func TestChunkStoreLeastRead(t *testing.T) {
 	const chunkLen = 60 // in seconds
 	for i := 0; i < 24; i++ {
 		ts := model.TimeFromUnix(int64(i * chunkLen))
-		chunks, _ := chunk.New().Add(model.SamplePair{
+		chunks, _ := promchunk.New().Add(model.SamplePair{
 			Timestamp: ts,
 			Value:     model.SampleValue(float64(i)),
 		})
 		chunk := NewChunk(
-			userID,
-			model.Fingerprint(1),
-			model.Metric{
-				model.MetricNameLabel: "foo",
-				"bar": "baz",
+			Descriptor{
+				UserID:      userID,
+				Fingerprint: model.Fingerprint(1),
+				Metric: model.Metric{
+					model.MetricNameLabel: "foo",
+					"bar": "baz",
+				},
+				From:    ts,
+				Through: ts.Add(chunkLen * time.Second),
 			},
 			chunks[0],
-			ts,
-			ts.Add(chunkLen*time.Second),
 		)
 		t.Logf("Loop %d", i)
 		err := store.Put(ctx, []Chunk{chunk})
@@ -494,8 +498,8 @@ func TestChunkStoreLeastRead(t *testing.T) {
 
 		// We need to check that each chunk is in the time range
 		for _, chunk := range chunks {
-			assert.False(t, chunk.From.After(endTime))
-			assert.False(t, chunk.Through.Before(startTime))
+			assert.False(t, chunk.Descriptor().From.After(endTime))
+			assert.False(t, chunk.Descriptor().Through.Before(startTime))
 			samples, err := chunk.Samples()
 			assert.NoError(t, err)
 			assert.Equal(t, 1, len(samples))

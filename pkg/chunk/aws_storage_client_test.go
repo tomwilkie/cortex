@@ -537,7 +537,7 @@ func testStorageClientChunks(t *testing.T, client StorageClient) {
 			chunks = append(chunks, chunk)
 			_, err := chunk.Encode() // Need to encode it, side effect calculates crc
 			require.NoError(t, err)
-			written = append(written, chunk.ExternalKey())
+			written = append(written, chunk.Descriptor().ExternalKey())
 		}
 		err := client.PutChunks(context.Background(), chunks)
 		require.NoError(t, err)
@@ -545,7 +545,7 @@ func testStorageClientChunks(t *testing.T, client StorageClient) {
 
 	// Get a few batches of chunks.
 	for i := 0; i < 50; i++ {
-		chunksToGet := []Chunk{}
+		chunksToGet := []Descriptor{}
 		for j := 0; j < batchSize; j++ {
 			key := written[rand.Intn(len(written))]
 			chunk, err := parseNewExternalKey(key)
@@ -556,11 +556,11 @@ func testStorageClientChunks(t *testing.T, client StorageClient) {
 		chunksWeGot, err := client.GetChunks(context.Background(), chunksToGet)
 		require.NoError(t, err)
 
-		sort.Sort(ByKey(chunksToGet))
+		sort.Sort(DescByKey(chunksToGet))
 		sort.Sort(ByKey(chunksWeGot))
 		require.Equal(t, len(chunksToGet), len(chunksWeGot))
 		for j := 0; j < len(chunksWeGot); j++ {
-			require.Equal(t, chunksToGet[i].ExternalKey(), chunksWeGot[i].ExternalKey())
+			require.Equal(t, chunksToGet[i].ExternalKey(), chunksWeGot[i].Descriptor().ExternalKey())
 		}
 	}
 }

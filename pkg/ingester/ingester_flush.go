@@ -194,7 +194,15 @@ func (i *Ingester) flushChunks(ctx context.Context, fp model.Fingerprint, metric
 
 	wireChunks := make([]chunk.Chunk, 0, len(chunkDescs))
 	for _, chunkDesc := range chunkDescs {
-		wireChunks = append(wireChunks, chunk.NewChunk(userID, fp, metric, chunkDesc.C, chunkDesc.FirstTime, chunkDesc.LastTime))
+		wireChunks = append(wireChunks, chunk.NewChunk(
+			chunk.Descriptor{
+				UserID:      userID,
+				Fingerprint: fp,
+				Metric:      metric,
+				From:        chunkDesc.FirstTime,
+				Through:     chunkDesc.LastTime,
+				Encoding:    chunkDesc.C.Encoding(),
+			}, chunkDesc.C))
 	}
 
 	if err := i.chunkStore.Put(ctx, wireChunks); err != nil {

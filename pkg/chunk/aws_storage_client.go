@@ -420,7 +420,7 @@ type chunksPlusError struct {
 	err    error
 }
 
-func (a awsStorageClient) GetChunks(ctx context.Context, chunks []Chunk) ([]Chunk, error) {
+func (a awsStorageClient) GetChunks(ctx context.Context, descs []Descriptor) ([]Chunk, error) {
 	sp, ctx := ot.StartSpanFromContext(ctx, "GetChunks")
 	defer sp.Finish()
 
@@ -429,11 +429,11 @@ func (a awsStorageClient) GetChunks(ctx context.Context, chunks []Chunk) ([]Chun
 		dynamoDBChunks []Chunk
 	)
 
-	for _, chunk := range chunks {
-		if !a.schemaCfg.ChunkTables.From.IsSet() || chunk.From.Before(a.schemaCfg.ChunkTables.From.Time) {
-			s3Chunks = append(s3Chunks, chunk)
+	for _, desc := range descs {
+		if !a.schemaCfg.ChunkTables.From.IsSet() || desc.From.Before(a.schemaCfg.ChunkTables.From.Time) {
+			s3Chunks = append(s3Chunks, NewChunk(desc, nil))
 		} else {
-			dynamoDBChunks = append(dynamoDBChunks, chunk)
+			dynamoDBChunks = append(dynamoDBChunks, NewChunk(desc, nil))
 		}
 	}
 
@@ -518,20 +518,20 @@ func (a awsStorageClient) getS3Chunk(ctx context.Context, chunk Chunk) (Chunk, e
 		var err error
 		resp, err = a.S3.GetObjectWithContext(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(a.bucketName),
-			Key:    aws.String(chunk.ExternalKey()),
+			Key:    aws.String(chunk.Descriptor().ExternalKey()),
 		})
 		return err
 	})
 	if err != nil {
-		return Chunk{}, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	buf, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return Chunk{}, err
+		return nil, err
 	}
 	if err := chunk.Decode(buf); err != nil {
-		return Chunk{}, err
+		return nil, err
 	}
 	return chunk, nil
 }
@@ -549,9 +549,9 @@ func (a awsStorageClient) getDynamoDBChunks(ctx context.Context, chunks []Chunk)
 	outstanding := dynamoDBReadRequest{}
 	chunksByKey := map[string]Chunk{}
 	for _, chunk := range chunks {
-		key := chunk.ExternalKey()
+		key := chunk.Descriptor().ExternalKey()
 		chunksByKey[key] = chunk
-		tableName := a.schemaCfg.ChunkTables.TableFor(chunk.From)
+		tableName := a.schemaCfg.ChunkTables.TableFor(chunk.Descriptor().From)
 		outstanding.Add(tableName, key, placeholder)
 	}
 
@@ -666,13 +666,13 @@ func (a awsStorageClient) PutChunks(ctx context.Context, chunks []Chunk) error {
 		if err != nil {
 			return err
 		}
-		key := chunks[i].ExternalKey()
+		key := chunks[i].Descriptor().ExternalKey()
 
-		if !a.schemaCfg.ChunkTables.From.IsSet() || chunks[i].From.Before(a.schemaCfg.ChunkTables.From.Time) {
+		if !a.schemaCfg.ChunkTables.From.IsSet() || chunks[i].Descriptor().From.Before(a.schemaCfg.ChunkTables.From.Time) {
 			s3ChunkKeys = append(s3ChunkKeys, key)
 			s3ChunkBufs = append(s3ChunkBufs, buf)
 		} else {
-			table := a.schemaCfg.ChunkTables.TableFor(chunks[i].From)
+			table := a.schemaCfg.ChunkTables.TableFor(chunks[i].Descriptor().From)
 			dynamoDBWrites.Add(table, key, placeholder, buf)
 		}
 	}

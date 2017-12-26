@@ -13,7 +13,7 @@ type StorageClient interface {
 
 	// For storing and retrieving chunks.
 	PutChunks(ctx context.Context, chunks []Chunk) error
-	GetChunks(ctx context.Context, chunks []Chunk) ([]Chunk, error)
+	GetChunks(ctx context.Context, descs []Descriptor) ([]Chunk, error)
 }
 
 // WriteBatch represents a batch of writes.

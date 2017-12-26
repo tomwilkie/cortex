@@ -8,7 +8,7 @@ import (
 	"github.com/bradfitz/gomemcache/memcache"
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
-	"github.com/weaveworks/cortex/pkg/prom1/storage/local/chunk"
+	promchunk "github.com/weaveworks/cortex/pkg/prom1/storage/local/chunk"
 	"golang.org/x/net/context"
 )
 
@@ -58,26 +58,29 @@ func TestChunkCache(t *testing.T) {
 	chunks := []Chunk{}
 	for i := 0; i < 100; i++ {
 		ts := model.TimeFromUnix(int64(i * chunkLen))
-		promChunk, _ := chunk.New().Add(model.SamplePair{
+		promChunk, _ := promchunk.New().Add(model.SamplePair{
 			Timestamp: ts,
 			Value:     model.SampleValue(i),
 		})
 		chunk := NewChunk(
-			userID,
-			model.Fingerprint(1),
-			model.Metric{
-				model.MetricNameLabel: "foo",
-				"bar": "baz",
+			Descriptor{
+				UserID:  userID,
+				From:    ts,
+				Through: ts.Add(chunkLen),
+				Metric: model.Metric{
+					model.MetricNameLabel: "foo",
+					"bar": "baz",
+				},
+				Fingerprint: model.Fingerprint(1),
+				Encoding:    promChunk[0].Encoding(),
 			},
 			promChunk[0],
-			ts,
-			ts.Add(chunkLen),
 		)
 
 		buf, err := chunk.Encode()
 		require.NoError(t, err)
 
-		key := chunk.ExternalKey()
+		key := chunk.Descriptor().ExternalKey()
 		err = c.StoreChunk(context.Background(), key, buf)
 		require.NoError(t, err)
 
@@ -89,10 +92,10 @@ func TestChunkCache(t *testing.T) {
 		index := rand.Intn(len(keys))
 		key := keys[index]
 
-		chunk, err := parseExternalKey(userID, key)
+		desc, err := parseExternalKey(userID, key)
 		require.NoError(t, err)
 
-		found, missing, err := c.FetchChunkData(context.Background(), []Chunk{chunk})
+		found, missing, err := c.FetchChunkData(context.Background(), []Descriptor{desc})
 		require.NoError(t, err)
 		require.Empty(t, missing)
 		require.Len(t, found, 1)
@@ -100,15 +103,15 @@ func TestChunkCache(t *testing.T) {
 	}
 
 	// test getting them all
-	receivedChunks := []Chunk{}
+	descs := []Descriptor{}
 	for i := 0; i < len(keys); i++ {
-		chunk, err := parseExternalKey(userID, keys[i])
+		desc, err := parseExternalKey(userID, keys[i])
 		require.NoError(t, err)
-		receivedChunks = append(receivedChunks, chunk)
+		descs = append(descs, desc)
 	}
-	found, missing, err := c.FetchChunkData(context.Background(), receivedChunks)
+	found, missing, err := c.FetchChunkData(context.Background(), descs)
 	require.NoError(t, err)
 	require.Empty(t, missing)
 	require.Len(t, found, len(keys))
-	require.Equal(t, chunks, receivedChunks)
+	require.Equal(t, chunks, found)
 }

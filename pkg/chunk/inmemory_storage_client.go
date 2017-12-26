@@ -246,23 +246,24 @@ func (m *MockStorage) PutChunks(_ context.Context, chunks []Chunk) error {
 		if err != nil {
 			return err
 		}
-		m.objects[chunks[i].ExternalKey()] = buf
+		m.objects[chunks[i].Descriptor().ExternalKey()] = buf
 	}
 	return nil
 }
 
 // GetChunks implements StorageClient.
-func (m *MockStorage) GetChunks(ctx context.Context, chunkSet []Chunk) ([]Chunk, error) {
+func (m *MockStorage) GetChunks(ctx context.Context, descs []Descriptor) ([]Chunk, error) {
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()
 
 	result := []Chunk{}
-	for _, chunk := range chunkSet {
-		key := chunk.ExternalKey()
+	for _, desc := range descs {
+		key := desc.ExternalKey()
 		buf, ok := m.objects[key]
 		if !ok {
 			return nil, fmt.Errorf("%v not found", key)
 		}
+		chunk := NewChunk(desc, nil)
 		if err := chunk.Decode(buf); err != nil {
 			return nil, err
 		}

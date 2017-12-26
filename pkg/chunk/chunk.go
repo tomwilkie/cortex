@@ -14,9 +14,9 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
 	prom_chunk "github.com/weaveworks/cortex/pkg/prom1/storage/local/chunk"
+	"github.com/weaveworks/cortex/pkg/util"
 
 	errs "github.com/weaveworks/common/errors"
-	"github.com/weaveworks/cortex/pkg/util"
 )
 
 // Errors that decode can return
@@ -28,8 +28,15 @@ const (
 
 var castagnoliTable = crc32.MakeTable(crc32.Castagnoli)
 
-// Chunk contains encoded timeseries data
-type Chunk struct {
+type Chunk interface {
+	Encode() ([]byte, error)
+	Decode(input []byte) error
+	Descriptor() Descriptor
+	Samples() ([]model.SamplePair, error)
+}
+
+// Descriptor contains all the metadata for a chunk.
+type Descriptor struct {
 	// These two fields will be missing from older chunks (as will the hash).
 	// On fetch we will initialise these fields from the DynamoDB key.
 	Fingerprint model.Fingerprint `json:"fingerprint"`
@@ -46,26 +53,27 @@ type Chunk struct {
 	ChecksumSet bool   `json:"-"`
 	Checksum    uint32 `json:"-"`
 
-	// We never use Delta encoding (the zero value), so if this entry is
-	// missing, we default to DoubleDelta.
-	Encoding prom_chunk.Encoding `json:"encoding"`
-	Data     prom_chunk.Chunk    `json:"-"`
-
 	// This flag is used for very old chunks, where the metadata is read out
 	// of the index.
 	metadataInIndex bool
+
+	// We never use Delta encoding (the zero value), so if this entry is
+	// missing, we default to DoubleDelta.
+	Encoding prom_chunk.Encoding `json:"encoding"`
+}
+
+// Chunk contains encoded timeseries data
+type chunk struct {
+	descriptor Descriptor
+
+	Data prom_chunk.Chunk `json:"-"`
 }
 
 // NewChunk creates a new chunk
-func NewChunk(userID string, fp model.Fingerprint, metric model.Metric, c prom_chunk.Chunk, from, through model.Time) Chunk {
-	return Chunk{
-		Fingerprint: fp,
-		UserID:      userID,
-		From:        from,
-		Through:     through,
-		Metric:      metric,
-		Encoding:    c.Encoding(),
-		Data:        c,
+func NewChunk(desc Descriptor, c prom_chunk.Chunk) Chunk {
+	return &chunk{
+		descriptor: desc,
+		Data:       c,
 	}
 }
 
@@ -82,38 +90,38 @@ func NewChunk(userID string, fp model.Fingerprint, metric model.Metric, c prom_c
 // Post-checksums, externals keys become the same across DynamoDB, Memcache
 // and S3.  Numbers become hex encoded.  Keys look like:
 // `<user id>/<fingerprint>:<start time>:<end time>:<checksum>`.
-func parseExternalKey(userID, externalKey string) (Chunk, error) {
+func parseExternalKey(userID, externalKey string) (Descriptor, error) {
 	if !strings.Contains(externalKey, "/") {
 		return parseLegacyChunkID(userID, externalKey)
 	}
-	chunk, err := parseNewExternalKey(externalKey)
+	descriptor, err := parseNewExternalKey(externalKey)
 	if err != nil {
-		return Chunk{}, err
+		return Descriptor{}, err
 	}
-	if chunk.UserID != userID {
-		return Chunk{}, errors.WithStack(ErrWrongMetadata)
+	if descriptor.UserID != userID {
+		return Descriptor{}, errors.WithStack(ErrWrongMetadata)
 	}
-	return chunk, nil
+	return descriptor, nil
 }
 
-func parseLegacyChunkID(userID, key string) (Chunk, error) {
+func parseLegacyChunkID(userID, key string) (Descriptor, error) {
 	parts := strings.Split(key, ":")
 	if len(parts) != 3 {
-		return Chunk{}, errors.WithStack(ErrInvalidChunkID)
+		return Descriptor{}, errors.WithStack(ErrInvalidChunkID)
 	}
 	fingerprint, err := strconv.ParseUint(parts[0], 10, 64)
 	if err != nil {
-		return Chunk{}, err
+		return Descriptor{}, err
 	}
 	from, err := strconv.ParseInt(parts[1], 10, 64)
 	if err != nil {
-		return Chunk{}, err
+		return Descriptor{}, err
 	}
 	through, err := strconv.ParseInt(parts[2], 10, 64)
 	if err != nil {
-		return Chunk{}, err
+		return Descriptor{}, err
 	}
-	return Chunk{
+	return Descriptor{
 		UserID:      userID,
 		Fingerprint: model.Fingerprint(fingerprint),
 		From:        model.Time(from),
@@ -121,33 +129,33 @@ func parseLegacyChunkID(userID, key string) (Chunk, error) {
 	}, nil
 }
 
-func parseNewExternalKey(key string) (Chunk, error) {
+func parseNewExternalKey(key string) (Descriptor, error) {
 	parts := strings.Split(key, "/")
 	if len(parts) != 2 {
-		return Chunk{}, errors.WithStack(ErrInvalidChunkID)
+		return Descriptor{}, errors.WithStack(ErrInvalidChunkID)
 	}
 	userID := parts[0]
 	hexParts := strings.Split(parts[1], ":")
 	if len(hexParts) != 4 {
-		return Chunk{}, errors.WithStack(ErrInvalidChunkID)
+		return Descriptor{}, errors.WithStack(ErrInvalidChunkID)
 	}
 	fingerprint, err := strconv.ParseUint(hexParts[0], 16, 64)
 	if err != nil {
-		return Chunk{}, err
+		return Descriptor{}, err
 	}
 	from, err := strconv.ParseInt(hexParts[1], 16, 64)
 	if err != nil {
-		return Chunk{}, err
+		return Descriptor{}, err
 	}
 	through, err := strconv.ParseInt(hexParts[2], 16, 64)
 	if err != nil {
-		return Chunk{}, err
+		return Descriptor{}, err
 	}
 	checksum, err := strconv.ParseUint(hexParts[3], 16, 32)
 	if err != nil {
-		return Chunk{}, err
+		return Descriptor{}, err
 	}
-	return Chunk{
+	return Descriptor{
 		UserID:      userID,
 		Fingerprint: model.Fingerprint(fingerprint),
 		From:        model.Time(from),
@@ -159,21 +167,25 @@ func parseNewExternalKey(key string) (Chunk, error) {
 
 // ExternalKey returns the key you can use to fetch this chunk from external
 // storage. For newer chunks, this key includes a checksum.
-func (c *Chunk) ExternalKey() string {
+func (d Descriptor) ExternalKey() string {
 	// Some chunks have a checksum stored in dynamodb, some do not.  We must
 	// generate keys appropriately.
-	if c.ChecksumSet {
+	if d.ChecksumSet {
 		// This is the inverse of parseNewExternalKey.
-		return fmt.Sprintf("%s/%x:%x:%x:%x", c.UserID, uint64(c.Fingerprint), int64(c.From), int64(c.Through), c.Checksum)
+		return fmt.Sprintf("%s/%x:%x:%x:%x", d.UserID, uint64(d.Fingerprint), int64(d.From), int64(d.Through), d.Checksum)
 	}
 	// This is the inverse of parseLegacyExternalKey, with "<user id>/" prepended.
 	// Legacy chunks had the user ID prefix on s3/memcache, but not in DynamoDB.
 	// See comment on parseExternalKey.
-	return fmt.Sprintf("%s/%d:%d:%d", c.UserID, uint64(c.Fingerprint), int64(c.From), int64(c.Through))
+	return fmt.Sprintf("%s/%d:%d:%d", d.UserID, uint64(d.Fingerprint), int64(d.From), int64(d.Through))
+}
+
+func (c *chunk) Descriptor() Descriptor {
+	return c.descriptor
 }
 
 // Encode writes the chunk out to a big write buffer, then calculates the checksum.
-func (c *Chunk) Encode() ([]byte, error) {
+func (c *chunk) Encode() ([]byte, error) {
 	var buf bytes.Buffer
 
 	// Write 4 empty bytes first - we will come back and put the len in here.
@@ -183,7 +195,7 @@ func (c *Chunk) Encode() ([]byte, error) {
 	}
 
 	// Encode chunk metadata into snappy-compressed buffer
-	if err := json.NewEncoder(snappy.NewWriter(&buf)).Encode(c); err != nil {
+	if err := json.NewEncoder(snappy.NewWriter(&buf)).Encode(c.Descriptor()); err != nil {
 		return nil, err
 	}
 
@@ -205,16 +217,16 @@ func (c *Chunk) Encode() ([]byte, error) {
 
 	// Now work out the checksum
 	output := buf.Bytes()
-	c.ChecksumSet = true
-	c.Checksum = crc32.Checksum(output, castagnoliTable)
+	c.descriptor.ChecksumSet = true
+	c.descriptor.Checksum = crc32.Checksum(output, castagnoliTable)
 	return output, nil
 }
 
 // Decode the chunk from the given buffer, and confirm the chunk is the one we
 // expected.
-func (c *Chunk) Decode(input []byte) error {
+func (c *chunk) Decode(input []byte) error {
 	// Legacy chunks were written with metadata in the index.
-	if c.metadataInIndex {
+	if c.descriptor.metadataInIndex {
 		var err error
 		c.Data, err = prom_chunk.NewForEncoding(prom_chunk.DoubleDelta)
 		if err != nil {
@@ -225,7 +237,7 @@ func (c *Chunk) Decode(input []byte) error {
 
 	// First, calculate the checksum of the chunk and confirm it matches
 	// what we expected.
-	if c.ChecksumSet && c.Checksum != crc32.Checksum(input, castagnoliTable) {
+	if c.descriptor.ChecksumSet && c.descriptor.Checksum != crc32.Checksum(input, castagnoliTable) {
 		return errors.WithStack(ErrInvalidChecksum)
 	}
 
@@ -235,7 +247,7 @@ func (c *Chunk) Decode(input []byte) error {
 	if err := binary.Read(r, binary.BigEndian, &metadataLen); err != nil {
 		return err
 	}
-	var tempMetadata Chunk
+	var tempMetadata Descriptor
 	err := json.NewDecoder(snappy.NewReader(&io.LimitedReader{
 		N: int64(metadataLen),
 		R: r,
@@ -247,23 +259,23 @@ func (c *Chunk) Decode(input []byte) error {
 	// Next, confirm the chunks matches what we expected.  Easiest way to do this
 	// is to compare what the decoded data thinks its external ID would be, but
 	// we don't write the checksum to s3, so we have to copy the checksum in.
-	if c.ChecksumSet {
-		tempMetadata.Checksum, tempMetadata.ChecksumSet = c.Checksum, c.ChecksumSet
-		if c.ExternalKey() != tempMetadata.ExternalKey() {
+	if c.descriptor.ChecksumSet {
+		tempMetadata.Checksum, tempMetadata.ChecksumSet = c.descriptor.Checksum, c.descriptor.ChecksumSet
+		if c.descriptor.ExternalKey() != tempMetadata.ExternalKey() {
 			return errors.WithStack(ErrWrongMetadata)
 		}
 	}
-	*c = tempMetadata
+	c.descriptor = tempMetadata
 
 	// Flag indicates if metadata was written to index, and if false implies
 	// we should read a header of the chunk containing the metadata.  Exists
 	// for backwards compatibility with older chunks, which did not have header.
-	if c.Encoding == prom_chunk.Delta {
-		c.Encoding = prom_chunk.DoubleDelta
+	if c.descriptor.Encoding == prom_chunk.Delta {
+		c.descriptor.Encoding = prom_chunk.DoubleDelta
 	}
 
 	// Finally, unmarshal the actual chunk data.
-	c.Data, err = prom_chunk.NewForEncoding(c.Encoding)
+	c.Data, err = prom_chunk.NewForEncoding(c.descriptor.Encoding)
 	if err != nil {
 		return err
 	}
@@ -279,15 +291,27 @@ func (c *Chunk) Decode(input []byte) error {
 	})
 }
 
+// Samples returns all SamplePairs for the chunk.
+func (c *chunk) Samples() ([]model.SamplePair, error) {
+	it := c.Data.NewIterator()
+	// TODO(juliusv): Pre-allocate this with the right length again once we
+	// add a method upstream to get the number of samples in a chunk.
+	var samples []model.SamplePair
+	for it.Scan() {
+		samples = append(samples, it.Value())
+	}
+	return samples, nil
+}
+
 func chunksToMatrix(chunks []Chunk) (model.Matrix, error) {
 	// Group chunks by series, sort and dedupe samples.
 	sampleStreams := map[model.Fingerprint]*model.SampleStream{}
 	for _, c := range chunks {
-		fp := c.Metric.Fingerprint()
+		fp := c.Descriptor().Metric.Fingerprint()
 		ss, ok := sampleStreams[fp]
 		if !ok {
 			ss = &model.SampleStream{
-				Metric: c.Metric,
+				Metric: c.Descriptor().Metric,
 			}
 			sampleStreams[fp] = ss
 		}
@@ -309,16 +333,4 @@ func chunksToMatrix(chunks []Chunk) (model.Matrix, error) {
 	}
 
 	return matrix, nil
-}
-
-// Samples returns all SamplePairs for the chunk.
-func (c *Chunk) Samples() ([]model.SamplePair, error) {
-	it := c.Data.NewIterator()
-	// TODO(juliusv): Pre-allocate this with the right length again once we
-	// add a method upstream to get the number of samples in a chunk.
-	var samples []model.SamplePair
-	for it.Scan() {
-		samples = append(samples, it.Value())
-	}
-	return samples, nil
 }
