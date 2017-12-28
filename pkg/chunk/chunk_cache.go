@@ -162,8 +162,8 @@ func (c *Cache) FetchChunkData(ctx context.Context, descs []Descriptor) (found [
 			continue
 		}
 
-		chunk := NewChunk(descs[i], nil)
-		if err := chunk.Decode(item.Value); err != nil {
+		chunk, err := Decode(descs[i], item.Value)
+		if err != nil {
 			memcacheCorrupt.Inc()
 			level.Error(util.WithContext(ctx, util.Logger)).Log("msg", "failed to decode chunk from cache", "err", err)
 			missing = append(missing, descs[i])

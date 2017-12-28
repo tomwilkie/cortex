@@ -30,7 +30,6 @@ var castagnoliTable = crc32.MakeTable(crc32.Castagnoli)
 
 type Chunk interface {
 	Encode() ([]byte, error)
-	Decode(input []byte) error
 	Descriptor() Descriptor
 	Samples() ([]model.SamplePair, error)
 }
@@ -224,71 +223,75 @@ func (c *chunk) Encode() ([]byte, error) {
 
 // Decode the chunk from the given buffer, and confirm the chunk is the one we
 // expected.
-func (c *chunk) Decode(input []byte) error {
+func Decode(desc Descriptor, input []byte) (Chunk, error) {
 	// Legacy chunks were written with metadata in the index.
-	if c.descriptor.metadataInIndex {
-		var err error
-		c.Data, err = prom_chunk.NewForEncoding(prom_chunk.DoubleDelta)
+	if desc.metadataInIndex {
+		data, err := prom_chunk.NewForEncoding(prom_chunk.DoubleDelta)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		return c.Data.UnmarshalFromBuf(input)
+		if err := data.UnmarshalFromBuf(input); err != nil {
+			return nil, err
+		}
+		return &chunk{desc, data}, nil
 	}
 
 	// First, calculate the checksum of the chunk and confirm it matches
 	// what we expected.
-	if c.descriptor.ChecksumSet && c.descriptor.Checksum != crc32.Checksum(input, castagnoliTable) {
-		return errors.WithStack(ErrInvalidChecksum)
+	if desc.ChecksumSet && desc.Checksum != crc32.Checksum(input, castagnoliTable) {
+		return nil, errors.WithStack(ErrInvalidChecksum)
 	}
 
 	// Now unmarshal the chunk metadata.
 	r := bytes.NewReader(input)
 	var metadataLen uint32
 	if err := binary.Read(r, binary.BigEndian, &metadataLen); err != nil {
-		return err
+		return nil, err
 	}
-	var tempMetadata Descriptor
+	var readDesc Descriptor
 	err := json.NewDecoder(snappy.NewReader(&io.LimitedReader{
 		N: int64(metadataLen),
 		R: r,
-	})).Decode(&tempMetadata)
+	})).Decode(&readDesc)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Next, confirm the chunks matches what we expected.  Easiest way to do this
 	// is to compare what the decoded data thinks its external ID would be, but
 	// we don't write the checksum to s3, so we have to copy the checksum in.
-	if c.descriptor.ChecksumSet {
-		tempMetadata.Checksum, tempMetadata.ChecksumSet = c.descriptor.Checksum, c.descriptor.ChecksumSet
-		if c.descriptor.ExternalKey() != tempMetadata.ExternalKey() {
-			return errors.WithStack(ErrWrongMetadata)
+	if readDesc.ChecksumSet {
+		readDesc.Checksum, readDesc.ChecksumSet = desc.Checksum, desc.ChecksumSet
+		if desc.ExternalKey() != readDesc.ExternalKey() {
+			return nil, errors.WithStack(ErrWrongMetadata)
 		}
 	}
-	c.descriptor = tempMetadata
 
 	// Flag indicates if metadata was written to index, and if false implies
 	// we should read a header of the chunk containing the metadata.  Exists
 	// for backwards compatibility with older chunks, which did not have header.
-	if c.descriptor.Encoding == prom_chunk.Delta {
-		c.descriptor.Encoding = prom_chunk.DoubleDelta
+	if readDesc.Encoding == prom_chunk.Delta {
+		readDesc.Encoding = prom_chunk.DoubleDelta
 	}
 
 	// Finally, unmarshal the actual chunk data.
-	c.Data, err = prom_chunk.NewForEncoding(c.descriptor.Encoding)
+	data, err := prom_chunk.NewForEncoding(readDesc.Encoding)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	var dataLen uint32
 	if err := binary.Read(r, binary.BigEndian, &dataLen); err != nil {
-		return err
+		return nil, err
 	}
 
-	return c.Data.Unmarshal(&io.LimitedReader{
+	if err := data.Unmarshal(&io.LimitedReader{
 		N: int64(dataLen),
 		R: r,
-	})
+	}); err != nil {
+		return nil, err
+	}
+	return &chunk{readDesc, data}, nil
 }
 
 // Samples returns all SamplePairs for the chunk.

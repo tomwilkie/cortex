@@ -263,8 +263,8 @@ func (m *MockStorage) GetChunks(ctx context.Context, descs []Descriptor) ([]Chun
 		if !ok {
 			return nil, fmt.Errorf("%v not found", key)
 		}
-		chunk := NewChunk(desc, nil)
-		if err := chunk.Decode(buf); err != nil {
+		chunk, err := Decode(desc, buf)
+		if err != nil {
 			return nil, err
 		}
 		result = append(result, chunk)

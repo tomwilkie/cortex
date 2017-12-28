@@ -93,8 +93,7 @@ func TestChunkCodec(t *testing.T) {
 				c.f(&desc, buf)
 			}
 
-			chunk := NewChunk(desc, nil)
-			err = chunk.Decode(buf)
+			chunk, err := Decode(desc, buf)
 			require.Equal(t, c.err, errors.Cause(err))
 
 			if c.err == nil {

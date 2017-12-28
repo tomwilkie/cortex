@@ -425,15 +425,15 @@ func (a awsStorageClient) GetChunks(ctx context.Context, descs []Descriptor) ([]
 	defer sp.Finish()
 
 	var (
-		s3Chunks       []Chunk
-		dynamoDBChunks []Chunk
+		s3Descs       []Descriptor
+		dynamoDBDescs []Descriptor
 	)
 
 	for _, desc := range descs {
 		if !a.schemaCfg.ChunkTables.From.IsSet() || desc.From.Before(a.schemaCfg.ChunkTables.From.Time) {
-			s3Chunks = append(s3Chunks, NewChunk(desc, nil))
+			s3Descs = append(s3Descs, desc)
 		} else {
-			dynamoDBChunks = append(dynamoDBChunks, NewChunk(desc, nil))
+			dynamoDBDescs = append(dynamoDBDescs, desc)
 		}
 	}
 
@@ -441,31 +441,29 @@ func (a awsStorageClient) GetChunks(ctx context.Context, descs []Descriptor) ([]
 	// doing both simultaneously except for when we migrate, when it will only
 	// occur for a couple or hours. So I didn't think it is worth the extra code
 	// to parallelise.
-
-	var err error
-	s3Chunks, err = a.getS3Chunks(ctx, s3Chunks)
+	s3Chunks, err := a.getS3Chunks(ctx, s3Descs)
 	if err != nil {
 		return s3Chunks, err
 	}
 
 	gangSize := a.cfg.DynamoDBChunkGangSize * dynamoDBMaxReadBatchSize
 	if gangSize == 0 { // zero means turn feature off
-		gangSize = len(dynamoDBChunks)
+		gangSize = len(dynamoDBDescs)
 	}
 
 	results := make(chan chunksPlusError)
-	for i := 0; i < len(dynamoDBChunks); i += gangSize {
+	for i := 0; i < len(dynamoDBDescs); i += gangSize {
 		go func(start int) {
 			end := start + gangSize
-			if end > len(dynamoDBChunks) {
-				end = len(dynamoDBChunks)
+			if end > len(dynamoDBDescs) {
+				end = len(dynamoDBDescs)
 			}
-			outChunks, err := a.getDynamoDBChunks(ctx, dynamoDBChunks[start:end])
+			outChunks, err := a.getDynamoDBChunks(ctx, dynamoDBDescs[start:end])
 			results <- chunksPlusError{outChunks, err}
 		}(i)
 	}
 	finalChunks := s3Chunks
-	for i := 0; i < len(dynamoDBChunks); i += gangSize {
+	for i := 0; i < len(dynamoDBDescs); i += gangSize {
 		in := <-results
 		if in.err != nil {
 			err = in.err // TODO: cancel other sub-queries at this point
@@ -481,23 +479,23 @@ func (a awsStorageClient) GetChunks(ctx context.Context, descs []Descriptor) ([]
 	return finalChunks, err
 }
 
-func (a awsStorageClient) getS3Chunks(ctx context.Context, chunks []Chunk) ([]Chunk, error) {
+func (a awsStorageClient) getS3Chunks(ctx context.Context, descs []Descriptor) ([]Chunk, error) {
 	incomingChunks := make(chan Chunk)
 	incomingErrors := make(chan error)
-	for _, chunk := range chunks {
-		go func(chunk Chunk) {
-			chunk, err := a.getS3Chunk(ctx, chunk)
+	for _, desc := range descs {
+		go func(desc Descriptor) {
+			chunk, err := a.getS3Chunk(ctx, desc)
 			if err != nil {
 				incomingErrors <- err
 				return
 			}
 			incomingChunks <- chunk
-		}(chunk)
+		}(desc)
 	}
 
 	result := []Chunk{}
 	errors := []error{}
-	for i := 0; i < len(chunks); i++ {
+	for i := 0; i < len(descs); i++ {
 		select {
 		case chunk := <-incomingChunks:
 			result = append(result, chunk)
@@ -512,13 +510,13 @@ func (a awsStorageClient) getS3Chunks(ctx context.Context, chunks []Chunk) ([]Ch
 	return result, nil
 }
 
-func (a awsStorageClient) getS3Chunk(ctx context.Context, chunk Chunk) (Chunk, error) {
+func (a awsStorageClient) getS3Chunk(ctx context.Context, desc Descriptor) (Chunk, error) {
 	var resp *s3.GetObjectOutput
 	err := instrument.TimeRequestHistogram(ctx, "S3.GetObject", s3RequestDuration, func(ctx context.Context) error {
 		var err error
 		resp, err = a.S3.GetObjectWithContext(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(a.bucketName),
-			Key:    aws.String(chunk.Descriptor().ExternalKey()),
+			Key:    aws.String(desc.ExternalKey()),
 		})
 		return err
 	})
@@ -530,10 +528,7 @@ func (a awsStorageClient) getS3Chunk(ctx context.Context, chunk Chunk) (Chunk, e
 	if err != nil {
 		return nil, err
 	}
-	if err := chunk.Decode(buf); err != nil {
-		return nil, err
-	}
-	return chunk, nil
+	return Decode(desc, buf)
 }
 
 // As we're re-using the DynamoDB schema from the index for the chunk tables,
@@ -543,15 +538,15 @@ var placeholder = []byte{'c'}
 // Fetch a set of chunks from DynamoDB, handling retries and backoff.
 // Structure is identical to BatchWrite(), but operating on different datatypes
 // so cannot share implementation.  If you fix a bug here fix it there too.
-func (a awsStorageClient) getDynamoDBChunks(ctx context.Context, chunks []Chunk) ([]Chunk, error) {
-	sp, ctx := ot.StartSpanFromContext(ctx, "getDynamoDBChunks", ot.Tag{"numChunks", len(chunks)})
+func (a awsStorageClient) getDynamoDBChunks(ctx context.Context, descs []Descriptor) ([]Chunk, error) {
+	sp, ctx := ot.StartSpanFromContext(ctx, "getDynamoDBChunks", ot.Tag{"numChunks", len(descs)})
 	defer sp.Finish()
 	outstanding := dynamoDBReadRequest{}
-	chunksByKey := map[string]Chunk{}
-	for _, chunk := range chunks {
-		key := chunk.Descriptor().ExternalKey()
-		chunksByKey[key] = chunk
-		tableName := a.schemaCfg.ChunkTables.TableFor(chunk.Descriptor().From)
+	descsByKey := map[string]Descriptor{}
+	for _, desc := range descs {
+		key := desc.ExternalKey()
+		descsByKey[key] = desc
+		tableName := a.schemaCfg.ChunkTables.TableFor(desc.From)
 		outstanding.Add(tableName, key, placeholder)
 	}
 
@@ -599,7 +594,7 @@ func (a awsStorageClient) getDynamoDBChunks(ctx context.Context, chunks []Chunk)
 			return nil, err
 		}
 
-		processedChunks, err := processChunkResponse(response, chunksByKey)
+		processedChunks, err := processChunkResponse(response, descsByKey)
 		if err != nil {
 			return nil, err
 		}
@@ -624,7 +619,7 @@ func (a awsStorageClient) getDynamoDBChunks(ctx context.Context, chunks []Chunk)
 	return result, nil
 }
 
-func processChunkResponse(response *dynamodb.BatchGetItemOutput, chunksByKey map[string]Chunk) ([]Chunk, error) {
+func processChunkResponse(response *dynamodb.BatchGetItemOutput, descsByKey map[string]Descriptor) ([]Chunk, error) {
 	result := []Chunk{}
 	for _, items := range response.Responses {
 		for _, item := range items {
@@ -633,7 +628,7 @@ func processChunkResponse(response *dynamodb.BatchGetItemOutput, chunksByKey map
 				return nil, fmt.Errorf("Got response from DynamoDB with no hash key: %+v", item)
 			}
 
-			chunk, ok := chunksByKey[*key.S]
+			desc, ok := descsByKey[*key.S]
 			if !ok {
 				return nil, fmt.Errorf("Got response from DynamoDB with chunk I didn't ask for: %s", *key.S)
 			}
@@ -643,7 +638,8 @@ func processChunkResponse(response *dynamodb.BatchGetItemOutput, chunksByKey map
 				return nil, fmt.Errorf("Got response from DynamoDB with no value: %+v", item)
 			}
 
-			if err := chunk.Decode(buf.B); err != nil {
+			chunk, err := Decode(desc, buf.B)
+			if err != nil {
 				return nil, err
 			}
 
