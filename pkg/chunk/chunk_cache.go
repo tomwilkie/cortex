@@ -1,6 +1,7 @@
 package chunk
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"sync"
@@ -162,7 +163,7 @@ func (c *Cache) FetchChunkData(ctx context.Context, descs []Descriptor) (found [
 			continue
 		}
 
-		chunk, err := Decode(descs[i], item.Value)
+		chunk, err := Decode(descs[i], bytes.NewReader(item.Value))
 		if err != nil {
 			memcacheCorrupt.Inc()
 			level.Error(util.WithContext(ctx, util.Logger)).Log("msg", "failed to decode chunk from cache", "err", err)

@@ -223,35 +223,38 @@ func (c *chunk) Encode() ([]byte, error) {
 
 // Decode the chunk from the given buffer, and confirm the chunk is the one we
 // expected.
-func Decode(desc Descriptor, input []byte) (Chunk, error) {
+func Decode(desc Descriptor, input io.Reader) (Chunk, error) {
 	// Legacy chunks were written with metadata in the index.
 	if desc.metadataInIndex {
 		data, err := prom_chunk.NewForEncoding(prom_chunk.DoubleDelta)
 		if err != nil {
 			return nil, err
 		}
-		if err := data.UnmarshalFromBuf(input); err != nil {
+		if err := data.Unmarshal(input); err != nil {
 			return nil, err
 		}
 		return &chunk{desc, data}, nil
 	}
 
-	// First, calculate the checksum of the chunk and confirm it matches
-	// what we expected.
-	if desc.ChecksumSet && desc.Checksum != crc32.Checksum(input, castagnoliTable) {
-		return nil, errors.WithStack(ErrInvalidChecksum)
+	// As the decode goes about reading the chunk, we will calculate the checksum.
+	// We will then check this matches at the end.
+	var checksum uint32
+	if desc.ChecksumSet {
+		input = io.TeeReader(input, writerFunc(func(read []byte) (int, error) {
+			checksum = crc32.Update(checksum, castagnoliTable, read)
+			return len(read), nil
+		}))
 	}
 
 	// Now unmarshal the chunk metadata.
-	r := bytes.NewReader(input)
 	var metadataLen uint32
-	if err := binary.Read(r, binary.BigEndian, &metadataLen); err != nil {
+	if err := binary.Read(input, binary.BigEndian, &metadataLen); err != nil {
 		return nil, err
 	}
 	var readDesc Descriptor
 	err := json.NewDecoder(snappy.NewReader(&io.LimitedReader{
 		N: int64(metadataLen),
-		R: r,
+		R: input,
 	})).Decode(&readDesc)
 	if err != nil {
 		return nil, err
@@ -281,18 +284,27 @@ func Decode(desc Descriptor, input []byte) (Chunk, error) {
 	}
 
 	var dataLen uint32
-	if err := binary.Read(r, binary.BigEndian, &dataLen); err != nil {
+	if err := binary.Read(input, binary.BigEndian, &dataLen); err != nil {
 		return nil, err
 	}
 
 	if err := data.Unmarshal(&io.LimitedReader{
 		N: int64(dataLen),
-		R: r,
+		R: input,
 	}); err != nil {
 		return nil, err
 	}
+
+	if desc.ChecksumSet && desc.Checksum != checksum {
+		return nil, errors.WithStack(ErrInvalidChecksum)
+	}
+
 	return &chunk{readDesc, data}, nil
 }
+
+type writerFunc func([]byte) (int, error)
+
+func (w writerFunc) Write(bs []byte) (int, error) { return w(bs) }
 
 // Samples returns all SamplePairs for the chunk.
 func (c *chunk) Samples() ([]model.SamplePair, error) {

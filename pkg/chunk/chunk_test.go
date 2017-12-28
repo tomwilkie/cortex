@@ -1,6 +1,7 @@
 package chunk
 
 import (
+	"bytes"
 	"fmt"
 	"sort"
 	"testing"
@@ -93,7 +94,7 @@ func TestChunkCodec(t *testing.T) {
 				c.f(&desc, buf)
 			}
 
-			chunk, err := Decode(desc, buf)
+			chunk, err := Decode(desc, bytes.NewReader(buf))
 			require.Equal(t, c.err, errors.Cause(err))
 
 			if c.err == nil {

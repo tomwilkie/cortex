@@ -5,7 +5,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"net/url"
 	"strings"
 	"time"
@@ -524,11 +523,7 @@ func (a awsStorageClient) getS3Chunk(ctx context.Context, desc Descriptor) (Chun
 		return nil, err
 	}
 	defer resp.Body.Close()
-	buf, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	return Decode(desc, buf)
+	return Decode(desc, resp.Body)
 }
 
 // As we're re-using the DynamoDB schema from the index for the chunk tables,
@@ -638,7 +633,7 @@ func processChunkResponse(response *dynamodb.BatchGetItemOutput, descsByKey map[
 				return nil, fmt.Errorf("Got response from DynamoDB with no value: %+v", item)
 			}
 
-			chunk, err := Decode(desc, buf.B)
+			chunk, err := Decode(desc, bytes.NewReader(buf.B))
 			if err != nil {
 				return nil, err
 			}
