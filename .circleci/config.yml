@@ -9,8 +9,8 @@ workflows:
     - integration
     - build
     - deploy:
-      requires:
-      - build
+        requires:
+        - build
 
 jobs:
   lint:
